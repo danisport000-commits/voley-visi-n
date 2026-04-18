@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>VoleyVision · YOLO</title>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    html,body{background:#070d1a;font-family:'DM Sans',sans-serif;color:#e2e8f0;}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes slideIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+    ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:#334155;border-radius:2px}
+    #app{min-height:100vh;background:linear-gradient(135deg,#070d1a,#0f172a,#0a1628);padding:14px;}
+    #visor{position:relative;width:100%;padding-bottom:56.25%;background:#050b18;
+      border:1px solid rgba(255,255,255,.07);border-radius:14px;overflow:hidden;margin-bottom:12px;}
+    #visor>*{position:absolute;top:0;left:0;width:100%;height:100%;}
+    #cam{object-fit:cover;z-index:0;}
+    #overlay{z-index:2;background:transparent;pointer-events:none;touch-action:auto;opacity:0.9999;-webkit-transform:translateZ(0);}
+    #placeholder{z-index:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;}
+    .badge{position:absolute;z-index:5;border-radius:6px;padding:4px 10px;font-size:10px;
+      font-family:'Bebas Neue',sans-serif;letter-spacing:2px;}
+    .panel{background:rgba(15,20,35,.9);border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:14px;margin-bottom:10px;}
+    .panel-title{font-family:'Bebas Neue',sans-serif;font-size:12px;color:#64748b;letter-spacing:2px;margin-bottom:10px;}
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <!-- HEADER -->
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+    <div style="width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#F59E0B,#EF4444);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">🏐</div>
+    <div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:3px;color:#f1f5f9;line-height:1;">VOLEY VISION</h1>
+      <p style="font-size:10px;color:#64748b;letter-spacing:1px;">DETECCIÓN YOLO · TIEMPO REAL</p>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap;" id="header-btns"></div>
+  </div>
+
+  <!-- VISOR -->
+  <div id="visor">
+    <video id="cam" autoplay playsinline muted style="display:none;"></video>
+    <canvas id="capture" style="display:none;"></canvas>
+    <canvas id="overlay"></canvas>
+    <div id="placeholder">
+      <div style="font-size:42px;opacity:.15;">📹</div>
+      <p style="color:#475569;font-size:13px;">Cámara inactiva</p>
+      <button id="btn-cam" style="background:linear-gradient(135deg,#F59E0B,#EF4444);border:none;border-radius:10px;padding:10px 22px;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:15px;letter-spacing:2px;cursor:pointer;position:relative;z-index:3;">ACTIVAR CÁMARA</button>
+    </div>
+  </div>
+
+  <!-- ESTADO MODELO -->
+  <div id="model-status" class="panel"></div>
+
+  <!-- PANEL CALIBRACIÓN -->
+  <div id="cal-panel" class="panel" style="display:none;background:rgba(245,158,11,.06);border-color:rgba(245,158,11,.25);">
+    <div class="panel-title" style="color:#F59E0B;">⊞ DELIMITA EL CAMPO — ARRASTRA CADA PUNTO</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-bottom:10px;" id="cal-legend"></div>
+    <div style="font-size:11px;color:#64748b;line-height:1.8;margin-bottom:12px;padding:8px 10px;background:rgba(0,0,0,.2);border-radius:8px;">
+      🔴 <strong style="color:#94a3b8;">BL/BR</strong> — Esquinas traseras (suelo, junto a cámara)<br/>
+      🟢 <strong style="color:#94a3b8;">FL/FR</strong> — Esquinas delanteras (suelo, a pie de red)<br/>
+      🟡 <strong style="color:#94a3b8;">NL/NR</strong> — Postes laterales de la red
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button id="btn-save-cal" style="flex:1;background:linear-gradient(135deg,#F59E0B,#EF4444);border:none;border-radius:10px;padding:13px;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:2px;cursor:pointer;">✓ GUARDAR CALIBRACIÓN</button>
+      <button id="btn-reset-cal" style="background:rgba(15,20,35,.8);border:1px solid #334155;border-radius:10px;padding:13px 14px;color:#64748b;font-size:12px;cursor:pointer;">Reset</button>
+    </div>
+  </div>
+
+  <!-- DETECCIONES EN VIVO -->
+  <div id="live-panel" class="panel" style="display:none;">
+    <div class="panel-title">DETECCIONES EN VIVO</div>
+    <div id="detections-list" style="display:flex;flex-wrap:wrap;gap:8px;min-height:28px;"></div>
+  </div>
+
+  <!-- INSTRUCCIONES DESCARGA MODELO -->
+  <div id="model-instructions" class="panel" style="background:rgba(59,130,246,.05);border-color:rgba(59,130,246,.2);">
+    <div class="panel-title" style="color:#60a5fa;">📦 MODELO YOLO — PRIMER USO</div>
+    <p style="font-size:12px;color:#94a3b8;line-height:1.8;margin-bottom:12px;">
+      Para la detección en tiempo real necesitas el archivo del modelo.<br/>
+      <strong style="color:#e2e8f0;">Descárgalo y súbelo a Netlify junto al index.html:</strong>
+    </p>
+    <a href="https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.onnx"
+       style="display:block;background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.35);border-radius:8px;padding:10px 14px;color:#60a5fa;text-decoration:none;font-size:13px;font-weight:600;margin-bottom:8px;">
+      ⬇️ Descargar yolov8n.onnx (~6 MB)
+    </a>
+    <p style="font-size:11px;color:#475569;line-height:1.6;">
+      En Netlify arrastra <strong style="color:#94a3b8;">los dos archivos juntos</strong> en el mismo deploy:<br/>
+      📄 index.html &nbsp;+&nbsp; 📦 yolov8n.onnx
+    </p>
+  </div>
+
+</div><!-- /app -->
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// HOMOGRAFÍA
+// ═══════════════════════════════════════════════════════════
+function gaussSolve(Ab){
+  const n=Ab.length,M=Ab.map(r=>[...r]);
+  for(let c=0;c<n;c++){
+    let mx=c;for(let r=c+1;r<n;r++)if(Math.abs(M[r][c])>Math.abs(M[mx][c]))mx=r;
+    [M[c],M[mx]]=[M[mx],M[c]];
+    for(let r=c+1;r<n;r++){const f=M[r][c]/M[c][c];for(let j=c;j<=n;j++)M[r][j]-=f*M[c][j];}
+  }
+  const x=new Array(n).fill(0);
+  for(let i=n-1;i>=0;i--){x[i]=M[i][n]/M[i][i];for(let j=0;j<i;j++)M[j][n]-=M[j][i]*x[i];}
+  return x;
+}
+function buildH(src,dst){
+  const A=[];
+  for(let i=0;i<4;i++){
+    const{x,y}=src[i],{x:u,y:v}=dst[i];
+    A.push([x,y,1,0,0,0,-u*x,-u*y,u]);A.push([0,0,0,x,y,1,-v*x,-v*y,v]);
+  }
+  const h=gaussSolve(A);return[[h[0],h[1],h[2]],[h[3],h[4],h[5]],[h[6],h[7],1]];
+}
+function applyH(H,x,y){
+  const w=H[2][0]*x+H[2][1]*y+H[2][2];
+  return{x:(H[0][0]*x+H[0][1]*y+H[0][2])/w,y:(H[1][0]*x+H[1][1]*y+H[1][2])/w};
+}
+function getZone(fx,fy){
+  if(fx<0||fx>8||fy<0||fy>8)return null;
+  return[[5,6,1],[4,3,2]][fy<4?0:1][fx<8/3?0:fx<16/3?1:2];
+}
+
+// ═══════════════════════════════════════════════════════════
+// CONSTANTES
+// ═══════════════════════════════════════════════════════════
+const FIELD_DST=[{x:0,y:0},{x:8,y:0},{x:8,y:8},{x:0,y:8}];
+const ZONE_LINES=[[{x:8/3,y:0},{x:8/3,y:8}],[{x:16/3,y:0},{x:16/3,y:8}],[{x:0,y:4},{x:8,y:4}]];
+const ZONE_LABELS=[{z:5,fx:4/3,fy:2},{z:6,fx:4,fy:2},{z:1,fx:20/3,fy:2},{z:4,fx:4/3,fy:6},{z:3,fx:4,fy:6},{z:2,fx:20/3,fy:6}];
+const INIT_CAL={bc_l:{x:.08,y:.88},bc_r:{x:.92,y:.88},fc_l:{x:.20,y:.12},fc_r:{x:.80,y:.12},net_l:{x:.22,y:.07},net_r:{x:.78,y:.07}};
+const CAL_DEF={bc_l:{label:"BL",color:"#EF4444",desc:"Esq. trasera izq"},bc_r:{label:"BR",color:"#EF4444",desc:"Esq. trasera der"},fc_l:{label:"FL",color:"#10B981",desc:"Esq. delantera izq"},fc_r:{label:"FR",color:"#10B981",desc:"Esq. delantera der"},net_l:{label:"NL",color:"#F59E0B",desc:"Poste red izq"},net_r:{label:"NR",color:"#F59E0B",desc:"Poste red der"}};
+const PLAYER_COLORS=["#3B82F6","#10B981","#EC4899","#8B5CF6","#F59E0B","#EF4444"];
+const CONF_THRESH=0.35, IOU_THRESH=0.45, SZ=640;
+const COCO_PERSON=0, COCO_BALL=32;
+
+// ═══════════════════════════════════════════════════════════
+// ESTADO
+// ═══════════════════════════════════════════════════════════
+const S={
+  camActive:false, mode:"main",
+  calPts:JSON.parse(JSON.stringify(INIT_CAL)),
+  calibrated:false, Hmat:null, drag:null,
+  model:null, modelLoading:false, modelReady:false,
+  detecting:false, rafId:null,
+  detections:[],
+};
+
+// ═══════════════════════════════════════════════════════════
+// DOM
+// ═══════════════════════════════════════════════════════════
+const video=document.getElementById("cam");
+const canvas=document.getElementById("overlay");
+const capCv=document.getElementById("capture");
+const visor=document.getElementById("visor");
+const ctx=canvas.getContext("2d");
+
+// ═══════════════════════════════════════════════════════════
+// CANVAS
+// ═══════════════════════════════════════════════════════════
+function syncCanvas(){
+  const r=visor.getBoundingClientRect(),w=Math.round(r.width),h=Math.round(r.height);
+  if(w>0&&h>0&&(canvas.width!==w||canvas.height!==h)){canvas.width=w;canvas.height=h;}
+}
+new ResizeObserver(()=>{syncCanvas();paint();}).observe(visor);
+
+function paint(){
+  syncCanvas();
+  const W=canvas.width,H=canvas.height;
+  if(!W||!H)return;
+  ctx.clearRect(0,0,W,H);
+  ctx.globalAlpha=1;ctx.globalCompositeOperation="source-over";
+  if(S.mode==="calibrating")paintCal(W,H);
+  else{if(S.calibrated&&S.Hmat)paintZones(W,H);paintDets(W,H);}
+}
+
+function paintCal(W,H){
+  const tp=p=>({x:p.x*W,y:p.y*H}),pts=S.calPts;
+  const c=["bc_l","bc_r","fc_r","fc_l"].map(id=>tp(pts[id]));
+  ctx.beginPath();c.forEach((p,i)=>i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y));
+  ctx.closePath();ctx.fillStyle="rgba(255,255,255,.04)";ctx.fill();
+  ctx.strokeStyle="rgba(255,255,255,.65)";ctx.lineWidth=2;ctx.setLineDash([]);ctx.stroke();
+  const nl=tp(pts.net_l),nr=tp(pts.net_r);
+  ctx.beginPath();ctx.moveTo(nl.x,nl.y);ctx.lineTo(nr.x,nr.y);
+  ctx.strokeStyle="#facc15";ctx.lineWidth=3;ctx.setLineDash([8,5]);ctx.stroke();
+  const fl=tp(pts.fc_l),fr=tp(pts.fc_r);
+  ctx.strokeStyle="rgba(250,204,21,.35)";ctx.lineWidth=1;ctx.setLineDash([4,4]);
+  ctx.beginPath();ctx.moveTo(nl.x,nl.y);ctx.lineTo(fl.x,fl.y);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(nr.x,nr.y);ctx.lineTo(fr.x,fr.y);ctx.stroke();
+  ctx.setLineDash([]);
+  Object.entries(pts).forEach(([id,pt])=>{
+    const p=tp(pt),def=CAL_DEF[id],active=S.drag===id,r=active?26:20;
+    ctx.beginPath();ctx.arc(p.x,p.y,r+8,0,Math.PI*2);ctx.fillStyle=def.color+"15";ctx.fill();
+    ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fillStyle="rgba(0,0,0,.6)";ctx.fill();
+    ctx.strokeStyle=active?"#fff":def.color;ctx.lineWidth=active?3:2.5;ctx.stroke();
+    ctx.fillStyle=active?"#fff":def.color;ctx.font=`bold ${active?11:10}px monospace`;
+    ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(def.label,p.x,p.y);
+  });
+  const msg="Arrastra los puntos a las posiciones reales del campo";
+  ctx.font="11px sans-serif";const mw=ctx.measureText(msg).width+24;
+  ctx.fillStyle="rgba(0,0,0,.78)";ctx.fillRect(W/2-mw/2,H-38,mw,26);
+  ctx.fillStyle="rgba(255,255,255,.8)";ctx.textAlign="center";ctx.textBaseline="middle";
+  ctx.fillText(msg,W/2,H-25);
+}
+
+function paintZones(W,H){
+  const f2p=(fx,fy)=>{const n=applyH(S.Hmat.toImage,fx,fy);return{x:n.x*W,y:n.y*H};};
+  const c=[[0,0],[8,0],[8,8],[0,8]].map(([fx,fy])=>f2p(fx,fy));
+  ctx.beginPath();c.forEach((p,i)=>i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y));
+  ctx.closePath();ctx.fillStyle="rgba(255,255,255,.015)";ctx.fill();
+  ctx.strokeStyle="rgba(255,255,255,.4)";ctx.lineWidth=1.5;ctx.setLineDash([]);ctx.stroke();
+  ZONE_LINES.forEach(([a,b])=>{
+    const pa=f2p(a.x,a.y),pb=f2p(b.x,b.y);
+    ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);
+    ctx.strokeStyle="rgba(255,255,255,.18)";ctx.lineWidth=1;ctx.setLineDash([4,4]);ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  const nl=f2p(0,8),nr=f2p(8,8);
+  ctx.beginPath();ctx.moveTo(nl.x,nl.y);ctx.lineTo(nr.x,nr.y);
+  ctx.strokeStyle="#facc15";ctx.lineWidth=2;ctx.setLineDash([6,4]);ctx.stroke();
+  ctx.setLineDash([]);
+  ZONE_LABELS.forEach(({z,fx,fy})=>{
+    const p=f2p(fx,fy);
+    ctx.beginPath();ctx.arc(p.x,p.y,14,0,Math.PI*2);
+    ctx.fillStyle="rgba(0,0,0,.55)";ctx.fill();
+    ctx.strokeStyle="rgba(255,255,255,.15)";ctx.lineWidth=1;ctx.stroke();
+    ctx.fillStyle="rgba(255,255,255,.85)";ctx.font="bold 11px sans-serif";
+    ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText("Z"+z,p.x,p.y);
+  });
+}
+
+function paintDets(W,H){
+  S.detections.forEach(det=>{
+    const{x1,y1,x2,y2,type,conf,zone,color,id}=det;
+    const col=type==="ball"?"#facc15":color;
+    // Box
+    ctx.strokeStyle=col;ctx.lineWidth=type==="ball"?2:2.5;ctx.setLineDash([]);
+    ctx.strokeRect(x1,y1,x2-x1,y2-y1);
+    ctx.fillStyle=col+"22";ctx.fillRect(x1,y1,x2-x1,y2-y1);
+    // Label
+    const label=type==="ball"?"🏐 balón":`J${id}${zone?" · Z"+zone:""}`;
+    ctx.font="bold 11px sans-serif";
+    const lw=ctx.measureText(label).width+10,lh=19;
+    const ly=y1>lh?y1-lh:y2;
+    ctx.fillStyle=col;ctx.fillRect(x1,ly,lw,lh);
+    ctx.fillStyle="#000";ctx.textAlign="left";ctx.textBaseline="middle";
+    ctx.fillText(label,x1+5,ly+lh/2);
+    // Punto de pie
+    if(type==="person"){
+      const fx=(x1+x2)/2,fy=y2;
+      ctx.beginPath();ctx.arc(fx,fy,5,0,Math.PI*2);ctx.fillStyle=col;ctx.fill();
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// LOOP
+// ═══════════════════════════════════════════════════════════
+function startLoop(){
+  if(S.rafId)return;
+  const loop=async()=>{
+    if(!S.camActive){S.rafId=null;return;}
+    paint();
+    if(S.modelReady&&!S.detecting&&video.readyState>=2){
+      await runDetection();
+      updateDetPanel();
+    }
+    S.rafId=requestAnimationFrame(loop);
+  };
+  S.rafId=requestAnimationFrame(loop);
+}
+function stopLoop(){if(S.rafId){cancelAnimationFrame(S.rafId);S.rafId=null;}}
+
+// ═══════════════════════════════════════════════════════════
+// YOLO
+// ═══════════════════════════════════════════════════════════
+function preprocess(){
+  capCv.width=SZ;capCv.height=SZ;
+  const c=capCv.getContext("2d");
+  const vw=video.videoWidth||640,vh=video.videoHeight||360;
+  const scale=Math.min(SZ/vw,SZ/vh);
+  const nw=Math.round(vw*scale),nh=Math.round(vh*scale);
+  const ox=Math.round((SZ-nw)/2),oy=Math.round((SZ-nh)/2);
+  c.fillStyle="#000";c.fillRect(0,0,SZ,SZ);
+  c.drawImage(video,ox,oy,nw,nh);
+  const d=c.getImageData(0,0,SZ,SZ).data;
+  const t=new Float32Array(3*SZ*SZ);
+  for(let i=0;i<SZ*SZ;i++){t[i]=d[i*4]/255;t[SZ*SZ+i]=d[i*4+1]/255;t[2*SZ*SZ+i]=d[i*4+2]/255;}
+  return{tensor:t,scale,ox,oy};
+}
+
+function iou(a,b){
+  const xi1=Math.max(a[0],b[0]),yi1=Math.max(a[1],b[1]),xi2=Math.min(a[2],b[2]),yi2=Math.min(a[3],b[3]);
+  const inter=Math.max(0,xi2-xi1)*Math.max(0,yi2-yi1);
+  const ua=(a[2]-a[0])*(a[3]-a[1])+(b[2]-b[0])*(b[3]-b[1])-inter;
+  return ua>0?inter/ua:0;
+}
+function nms(boxes){
+  boxes.sort((a,b)=>b.conf-a.conf);
+  const keep=[],sup=new Set();
+  for(let i=0;i<boxes.length;i++){
+    if(sup.has(i))continue;keep.push(boxes[i]);
+    for(let j=i+1;j<boxes.length;j++)
+      if(!sup.has(j)&&iou([boxes[i].x1,boxes[i].y1,boxes[i].x2,boxes[i].y2],[boxes[j].x1,boxes[j].y1,boxes[j].x2,boxes[j].y2])>IOU_THRESH)sup.add(j);
+  }
+  return keep;
+}
+
+function postprocess(data,scale,ox,oy,W,H){
+  const N=8400,boxes=[];
+  const sx=W/(video.videoWidth||640),sy=H/(video.videoHeight||360);
+  for(let i=0;i<N;i++){
+    const cx=data[0*N+i],cy=data[1*N+i],bw=data[2*N+i],bh=data[3*N+i];
+    let maxS=0,maxC=0;
+    for(let c=0;c<80;c++){const s=data[(4+c)*N+i];if(s>maxS){maxS=s;maxC=c;}}
+    if(maxS<CONF_THRESH)continue;
+    if(maxC!==COCO_PERSON&&maxC!==COCO_BALL)continue;
+    const x1v=(cx-bw/2-ox)/scale,y1v=(cy-bh/2-oy)/scale;
+    const x2v=(cx+bw/2-ox)/scale,y2v=(cy+bh/2-oy)/scale;
+    boxes.push({x1:x1v*sx,y1:y1v*sy,x2:x2v*sx,y2:y2v*sy,conf:maxS,type:maxC===COCO_PERSON?"person":"ball"});
+  }
+  return{persons:nms(boxes.filter(b=>b.type==="person")),balls:nms(boxes.filter(b=>b.type==="ball"))};
+}
+
+async function runDetection(){
+  if(!S.model||S.detecting)return;
+  S.detecting=true;
+  try{
+    const{tensor,scale,ox,oy}=preprocess();
+    const inp=new ort.Tensor("float32",tensor,[1,3,SZ,SZ]);
+    const feeds={};feeds[S.inputName||"images"]=inp;const res=await S.model.run(feeds);
+    const outData=res[Object.keys(res)[0]].data;
+    const W=canvas.width,H=canvas.height;
+    const{persons,balls}=postprocess(outData,scale,ox,oy,W,H);
+    const dets=[];
+    persons.forEach((p,i)=>{
+      let zone=null;
+      if(S.calibrated&&S.Hmat){
+        const cx=(p.x1+p.x2)/2,cy=p.y2;
+        const f=applyH(S.Hmat.toField,cx/W,cy/H);
+        zone=getZone(f.x,f.y);
+      }
+      dets.push({...p,id:i+1,color:PLAYER_COLORS[i%PLAYER_COLORS.length],zone});
+    });
+    balls.forEach(b=>dets.push({...b,id:0,color:"#facc15",zone:null}));
+    S.detections=dets;
+  }catch(e){console.warn("YOLO error:",e);}
+  S.detecting=false;
+}
+
+// ═══════════════════════════════════════════════════════════
+// CARGAR MODELO
+// ═══════════════════════════════════════════════════════════
+async function loadModel(){
+  if(S.modelLoading||S.modelReady)return;
+  S.modelLoading=true;setModelStatus("loading");
+  try{
+    ort.env.wasm.wasmPaths="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/";
+    ort.env.wasm.numThreads=1;
+    S.model=await ort.InferenceSession.create("./yolov8n.onnx",{
+      executionProviders:["wasm"],graphOptimizationLevel:"all"
+    });
+    // Detectar nombre real del input
+    S.inputName=S.model.inputNames[0];
+    console.log("Input names:",S.model.inputNames);
+    console.log("Output names:",S.model.outputNames);
+    S.modelReady=true;S.modelLoading=false;
+    setModelStatus("ready");
+    document.getElementById("model-instructions").style.display="none";
+    document.getElementById("live-panel").style.display="block";
+  }catch(e){
+    S.modelLoading=false;console.error('ONNX load error:',e);setModelStatus("error",e.message);
+  }
+}
+
+function setModelStatus(status,msg){
+  const el=document.getElementById("model-status");
+  if(status==="loading"){
+    el.innerHTML=`<div style="display:flex;align-items:center;gap:10px;">
+      <div style="width:16px;height:16px;border:2px solid #334155;border-top-color:#F59E0B;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0;"></div>
+      <div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:12px;color:#F59E0B;letter-spacing:2px;">CARGANDO MODELO YOLO…</div>
+        <div style="font-size:11px;color:#64748b;margin-top:2px;">Descargando yolov8n.onnx (~6MB), espera unos segundos</div>
+      </div>
+    </div>`;
+  }else if(status==="ready"){
+    el.innerHTML=`<div style="display:flex;align-items:center;gap:8px;">
+      <div style="width:8px;height:8px;border-radius:50%;background:#10B981;animation:pulse 2s infinite;"></div>
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:12px;color:#10B981;letter-spacing:2px;">YOLO ACTIVO · DETECCIÓN EN TIEMPO REAL</div>
+    </div>`;
+  }else if(status==="error"){
+    el.innerHTML=`<div>
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:12px;color:#EF4444;letter-spacing:2px;margin-bottom:6px;">⚠️ ERROR AL CARGAR EL MODELO</div>
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:10px;line-height:1.6;"><span id='err-detail'></span>Abre la consola del navegador (F12 en escritorio) para ver el error completo.</div>
+      <button onclick="loadModel()" style="background:none;border:1px solid #334155;border-radius:6px;padding:5px 12px;color:#94a3b8;font-size:11px;cursor:pointer;">🔄 Reintentar</button>
+    </div>`;
+  }else{
+    el.innerHTML=`<div style="font-family:'Bebas Neue',sans-serif;font-size:12px;color:#334155;letter-spacing:2px;">MODELO YOLO — INACTIVO</div>`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// PANEL DETECCIONES
+// ═══════════════════════════════════════════════════════════
+function updateDetPanel(){
+  const list=document.getElementById("detections-list");
+  const persons=S.detections.filter(d=>d.type==="person");
+  const balls=S.detections.filter(d=>d.type==="ball");
+  let html="";
+  persons.forEach(p=>{
+    html+=`<div style="display:flex;align-items:center;gap:6px;background:${p.color}18;border:1px solid ${p.color}44;border-radius:8px;padding:6px 10px;animation:slideIn .15s ease;">
+      <div style="width:9px;height:9px;border-radius:50%;background:${p.color};flex-shrink:0;"></div>
+      <span style="font-family:'Bebas Neue',sans-serif;font-size:13px;color:${p.color};letter-spacing:1px;">J${p.id}</span>
+      ${p.zone?`<span style="font-size:11px;font-weight:700;background:rgba(245,158,11,.15);color:#F59E0B;border:1px solid rgba(245,158,11,.3);border-radius:4px;padding:1px 7px;">Z${p.zone}</span>`:'<span style="font-size:10px;color:#475569;">fuera</span>'}
+      <span style="font-size:10px;color:#475569;margin-left:auto;">${Math.round(p.conf*100)}%</span>
+    </div>`;
+  });
+  if(balls.length){
+    html+=`<div style="display:flex;align-items:center;gap:6px;background:rgba(250,204,21,.08);border:1px solid rgba(250,204,21,.3);border-radius:8px;padding:6px 10px;">
+      <span style="font-size:13px;">🏐</span>
+      <span style="font-family:'Bebas Neue',sans-serif;font-size:13px;color:#facc15;letter-spacing:1px;">BALÓN</span>
+      <span style="font-size:10px;color:#475569;margin-left:auto;">${Math.round(balls[0].conf*100)}%</span>
+    </div>`;
+  }
+  if(!html)html=`<p style="font-size:12px;color:#334155;">Sin detecciones en este frame…</p>`;
+  list.innerHTML=html;
+}
+
+// ═══════════════════════════════════════════════════════════
+// CÁMARA
+// ═══════════════════════════════════════════════════════════
+let mediaStream=null;
+async function startCamera(){
+  const secure=location.protocol==="https:"||["localhost","127.0.0.1"].includes(location.hostname);
+  if(!secure){showErr("La cámara requiere HTTPS. Sube la app a Netlify.");return;}
+  if(!navigator.mediaDevices?.getUserMedia){showErr("Navegador no compatible. Usa Chrome o Safari.");return;}
+  try{
+    mediaStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1280},height:{ideal:720}}});
+    video.srcObject=mediaStream;await video.play();
+    video.style.display="block";
+    document.getElementById("placeholder").style.display="none";
+    S.camActive=true;
+    setModelStatus("idle");
+    loadModel();
+    startLoop();
+    syncCanvas();paint();
+    renderHeader();
+    updateBadges();
+  }catch(e){
+    const m={NotAllowedError:"Permiso denegado. Ajustes → Cámara → Permitir.",NotFoundError:"No se encontró cámara.",NotReadableError:"Cámara en uso por otra app."};
+    showErr(m[e.name]||"Error: "+e.message);
+  }
+}
+function stopCamera(){
+  mediaStream?.getTracks().forEach(t=>t.stop());mediaStream=null;
+  video.style.display="none";video.srcObject=null;
+  document.getElementById("placeholder").style.display="flex";
+  S.camActive=false;S.detections=[];
+  stopLoop();renderHeader();updateBadges();
+  document.getElementById("live-panel").style.display="none";
+  paint();
+}
+
+// ═══════════════════════════════════════════════════════════
+// CALIBRACIÓN
+// ═══════════════════════════════════════════════════════════
+function getN(e){
+  const r=canvas.getBoundingClientRect(),s=e.touches?e.touches[0]:e;
+  return{x:Math.max(0,Math.min(1,(s.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(s.clientY-r.top)/r.height))};
+}
+canvas.addEventListener("mousedown",e=>{
+  if(S.mode!=="calibrating")return;
+  const{x,y}=getN(e);let cl=null,md=Infinity;
+  Object.entries(S.calPts).forEach(([id,pt])=>{const d=Math.hypot(pt.x-x,pt.y-y);if(d<md&&d<0.14){md=d;cl=id;}});
+  if(cl){S.drag=cl;e.preventDefault();paint();}
+});
+canvas.addEventListener("mousemove",e=>{
+  if(!S.drag)return;e.preventDefault();
+  const{x,y}=getN(e);S.calPts[S.drag]={x,y};paint();
+});
+canvas.addEventListener("mouseup",()=>{S.drag=null;paint();});
+canvas.addEventListener("mouseleave",()=>{S.drag=null;paint();});
+canvas.addEventListener("touchstart",e=>{
+  if(S.mode!=="calibrating")return;
+  const{x,y}=getN(e);let cl=null,md=Infinity;
+  Object.entries(S.calPts).forEach(([id,pt])=>{const d=Math.hypot(pt.x-x,pt.y-y);if(d<md&&d<0.14){md=d;cl=id;}});
+  if(cl){S.drag=cl;e.preventDefault();paint();}
+},{passive:false});
+canvas.addEventListener("touchmove",e=>{
+  if(!S.drag)return;e.preventDefault();
+  const{x,y}=getN(e);S.calPts[S.drag]={x,y};paint();
+},{passive:false});
+canvas.addEventListener("touchend",()=>{S.drag=null;paint();});
+
+function setCalMode(on){
+  S.mode=on?"calibrating":"main";
+  canvas.style.cursor=on?"crosshair":"default";
+  canvas.style.pointerEvents=on?"auto":"none";
+  canvas.style.touchAction=on?"none":"auto";
+  document.getElementById("cal-panel").style.display=on?"block":"none";
+  renderHeader();updateBadges();paint();
+}
+function saveCalibration(){
+  const src=[S.calPts.bc_l,S.calPts.bc_r,S.calPts.fc_r,S.calPts.fc_l];
+  S.Hmat={toField:buildH(src,FIELD_DST),toImage:buildH(FIELD_DST,src)};
+  S.calibrated=true;setCalMode(false);
+}
+
+// ═══════════════════════════════════════════════════════════
+// HEADER + BADGES
+// ═══════════════════════════════════════════════════════════
+function renderHeader(){
+  const c=document.getElementById("header-btns");
+  let h="";
+  if(S.calibrated&&S.mode!=="calibrating")
+    h+=`<div style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:6px;background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);">
+      <div style="width:6px;height:6px;border-radius:50%;background:#10B981;"></div>
+      <span style="font-size:10px;color:#10B981;font-family:'Bebas Neue',sans-serif;letter-spacing:1px;">CALIBRADO</span></div>`;
+  if(S.mode==="calibrating")
+    h+=`<button onclick="setCalMode(false)" style="font-size:11px;color:#F59E0B;background:none;border:1px solid rgba(245,158,11,.35);border-radius:6px;padding:5px 10px;cursor:pointer;">✕ Cancelar</button>`;
+  else
+    h+=`<button onclick="setCalMode(true)" style="font-size:11px;color:#94a3b8;background:none;border:1px solid #334155;border-radius:6px;padding:5px 10px;cursor:pointer;">⊞ Calibrar campo</button>`;
+  if(S.camActive)
+    h+=`<button onclick="stopCamera()" style="font-size:11px;color:#EF4444;background:none;border:1px solid rgba(239,68,68,.3);border-radius:6px;padding:5px 10px;cursor:pointer;">✕ Parar</button>`;
+  c.innerHTML=h;
+}
+
+function updateBadges(){
+  // Badge EN VIVO
+  let b=document.getElementById("badge-live");
+  if(S.camActive&&!b){
+    b=document.createElement("div");b.id="badge-live";b.className="badge";
+    b.style.cssText="top:10px;left:10px;background:rgba(0,0,0,.6);display:flex;align-items:center;gap:5px;";
+    b.innerHTML=`<div style="width:7px;height:7px;border-radius:50%;background:#EF4444;animation:pulse 1.5s infinite;"></div><span style="color:#fff;font-size:10px;">EN VIVO</span>`;
+    visor.appendChild(b);
+  }else if(!S.camActive&&b)b.remove();
+  // Badge CALIBRACIÓN
+  let bc=document.getElementById("badge-cal");
+  if(S.mode==="calibrating"&&!bc){
+    bc=document.createElement("div");bc.id="badge-cal";bc.className="badge";
+    bc.style.cssText="top:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.8);border:1px solid rgba(250,204,21,.5);color:#facc15;white-space:nowrap;";
+    bc.textContent="MODO CALIBRACIÓN";visor.appendChild(bc);
+  }else if(S.mode!=="calibrating"&&bc)bc.remove();
+  // Badge YOLO
+  let by=document.getElementById("badge-yolo");
+  if(S.modelReady&&S.camActive&&!by){
+    by=document.createElement("div");by.id="badge-yolo";by.className="badge";
+    by.style.cssText="top:10px;right:10px;background:rgba(16,185,129,.2);border:1px solid rgba(16,185,129,.4);color:#10B981;";
+    by.textContent="YOLO";visor.appendChild(by);
+  }else if((!S.modelReady||!S.camActive)&&by)by.remove();
+}
+
+function showErr(msg){
+  let e=document.getElementById("err-msg");
+  if(!e){e=document.createElement("div");e.id="err-msg";document.getElementById("app").insertBefore(e,document.getElementById("model-status"));}
+  e.style.cssText="background:#EF444418;border:1px solid #EF444444;border-radius:10px;padding:10px 14px;margin-bottom:10px;font-size:13px;color:#fca5a5;";
+  e.textContent="⚠️ "+msg;setTimeout(()=>e.remove(),7000);
+}
+
+// ═══════════════════════════════════════════════════════════
+// LEYENDA CALIBRACIÓN
+// ═══════════════════════════════════════════════════════════
+(()=>{
+  const leg=document.getElementById("cal-legend");
+  Object.entries(CAL_DEF).forEach(([id,def])=>{
+    const d=document.createElement("div");
+    d.style.cssText="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;";
+    d.innerHTML=`<div style="width:9px;height:9px;border-radius:50%;background:${def.color};flex-shrink:0;"></div>
+      <span style="font-weight:700;color:${def.color};font-family:monospace;font-size:10px;">${id.toUpperCase()}</span>
+      <span>${def.desc}</span>`;
+    leg.appendChild(d);
+  });
+})();
+
+// ═══════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════
+document.getElementById("btn-cam").onclick=startCamera;
+document.getElementById("btn-save-cal").onclick=saveCalibration;
+document.getElementById("btn-reset-cal").onclick=()=>{
+  Object.assign(S.calPts,JSON.parse(JSON.stringify(INIT_CAL)));paint();
+};
+setModelStatus("idle");
+renderHeader();syncCanvas();paint();
+</script>
+</body>
+</html>
